@@ -1,4 +1,4 @@
-// ## frontend/src/App.js
+// frontend/src/App.js
 import React, { useEffect, useRef, useState } from "react";
 import Hls from "hls.js";
 
@@ -6,61 +6,100 @@ function App() {
   const videoRef = useRef(null);
   const hlsRef = useRef(null);
 
-  // Поле для RTSP-URL
-  const [rtspUrl, setRtspUrl] = useState("");
+  // Текущий RTSP (установленный)
+  const [currentRtspUrl, setCurrentRtspUrl] = useState("");
+  // Новый RTSP (пользовательский ввод)
+  const [newRtspUrl, setNewRtspUrl] = useState("");
 
+  // Флаг — ждать ли перезагрузку страницы при получении SSE
+  const [shouldReloadOnPlaylistUpdate, setShouldReloadOnPlaylistUpdate] =
+    useState(false);
+
+  // Подключение к SSE (одноразово)
   useEffect(() => {
-    // Инициализируем Hls один раз
+    const eventSource = new EventSource(
+      "http://localhost:8000/api/hls-updates"
+    );
+
+    eventSource.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === "playlist-updated") {
+          console.log("Получили SSE: playlist-updated");
+          // Перезагружаемся только если выставлен флаг
+          if (shouldReloadOnPlaylistUpdate) {
+            window.location.reload();
+          }
+        }
+      } catch (err) {
+        console.error("Ошибка обработки SSE:", err);
+      }
+    };
+
+    eventSource.onerror = (err) => {
+      console.error("SSE ошибка:", err);
+    };
+
+    return () => {
+      eventSource.close();
+    };
+  }, [shouldReloadOnPlaylistUpdate]);
+
+  // Инициализация Hls и проигрывание
+  useEffect(() => {
     if (Hls.isSupported()) {
       hlsRef.current = new Hls({ debug: true });
-
-      // Загружаем "стандартный" поток при старте
       hlsRef.current.loadSource("http://localhost:8000/stream/index.m3u8");
       hlsRef.current.attachMedia(videoRef.current);
 
       hlsRef.current.on(Hls.Events.MANIFEST_PARSED, () => {
-        console.log("HLS манифест загружен, пробуем play()");
-        videoRef.current.play().catch((err) => {
-          console.error("Autoplay error:", err);
-        });
+        videoRef.current
+          .play()
+          .catch((err) => console.error("Autoplay error:", err));
       });
     } else if (videoRef.current.canPlayType("application/vnd.apple.mpegurl")) {
       // Для Safari
       videoRef.current.src = "http://localhost:8000/stream/index.m3u8";
       videoRef.current.addEventListener("loadedmetadata", () => {
-        videoRef.current.play().catch((err) => {
-          console.error("Autoplay error (Safari):", err);
-        });
+        videoRef.current
+          .play()
+          .catch((err) => console.error("Autoplay error (Safari):", err));
       });
     }
   }, []);
 
-  // Функция отправки нового RTSP
+  // Когда нажимаем "Подключиться"
   const handleConnect = async () => {
+    // Проверяем, действительно ли новый URL отличается от текущего
+    if (!newRtspUrl || newRtspUrl === currentRtspUrl) {
+      console.log("URL не изменился — не пересоздаём поток");
+      return;
+    }
+
     try {
-      // 1) Отправляем на бекенд новый RTSP
       const resp = await fetch("http://localhost:8000/api/set-rtsp", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ rtspUrl }),
+        body: JSON.stringify({ rtspUrl: newRtspUrl }),
       });
       if (!resp.ok) {
         console.error("Ошибка при установке RTSP:", resp.statusText);
       } else {
-        console.log("RTSP-URL успешно установлен:", rtspUrl);
+        console.log("RTSP-URL успешно установлен:", newRtspUrl);
 
-        // 2) Заново подгружаем тот же /stream/index.m3u8
+        // Запоминаем, что у нас теперь текущий URL изменился
+        setCurrentRtspUrl(newRtspUrl);
+
+        // Устанавливаем флаг — теперь, когда index.m3u8 обновится, мы хотим перезагрузку
+        setShouldReloadOnPlaylistUpdate(true);
+
+        // Перезапускаем Hls (не обязательно, если всё равно собираемся делать reload,
+        // но иногда полезно, если до reload нужно успеть что-то показать)
         if (hlsRef.current) {
-          // Остановка предыдущего буферизации (не обязательно, но иногда помогает)
           hlsRef.current.stopLoad();
-
-          // Загружаем заново
           hlsRef.current.loadSource("http://localhost:8000/stream/index.m3u8");
-          // Запуск буферизации
           hlsRef.current.startLoad(-1);
         }
-
-        // 3) Перезапускаем video (тоже не всегда обязательно)
         if (videoRef.current) {
           videoRef.current.pause();
           videoRef.current.load();
@@ -82,8 +121,8 @@ function App() {
         <input
           type="text"
           placeholder="Введите RTSP-URL"
-          value={rtspUrl}
-          onChange={(e) => setRtspUrl(e.target.value)}
+          value={newRtspUrl}
+          onChange={(e) => setNewRtspUrl(e.target.value)}
           style={{ width: "60%", padding: "8px" }}
         />
         <button
